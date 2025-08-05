@@ -1,0 +1,101 @@
+# --- macOS cruft ---
+.DS_Store
+.AppleDouble
+.LSOverride
+__MACOSX/
+Icon?
+.Spotlight-V100
+.Trashes
+.TemporaryItems
+.fseventsd
+.apdisk
+
+# --- Visual Studio Code ---
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+# If you want to share these too, uncomment:
+# !.vscode/launch.json
+# !.vscode/tasks.json
+
+# --- Python bytecode / caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-env/
+.python_packages/
+
+# PEP 582 local packages (pdm/uv)
+__pypackages__/
+
+# --- Packaging / build artifacts ---
+build/
+dist/
+wheels/
+share/python-wheels/
+*.egg-info/
+.eggs/
+*.egg
+MANIFEST
+pip-wheel-metadata/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- Compiled extensions ---
+*.so
+*.pyd
+*.dll
+
+# --- PyInstaller ---
+*.spec
+*.manifest
+
+# --- Testing / coverage ---
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+coverage.xml
+nosetests.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# --- Type checkers / analyzers ---
+.mypy_cache/
+.dmypy.json
+.pytype/
+.pyre/
+.ruff_cache/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+jupyter_cache/
+profile_default/
+.ipynb_checkpoints/
+
+# --- Docs (Sphinx, etc.) ---
+docs/_build/
+doc/_build/
+
+# --- Lint/IDE helpers ---
+.pylint.d/
+.ropeproject/
+.idea/
+*.iml
+
+# --- Environment / secrets (adjust to your needs) ---
+.env
+.env.*
+*.env
+*.env.*
