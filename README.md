@@ -1,51 +1,35 @@
-# UFC Elo Ratings — Step 1 (Data Unification)
+# UFC Elo Ratings (UFC-only) — Quick README
 
-This repo (so far) loads your **UFC-only** CSV exports, cleans them, and produces a single, time-ordered fights table we’ll use for Elo updates in the next step.
-
-## What this step does
-
-* Reads:
-
-  * `ufc_event_details.csv` (event dates)
-  * `ufc_fight_results.csv` (who fought, who won, method, judges detail)
-  * `UFC_fighter_tott.csv` *(optional)* for stable fighter IDs via UFC Stats profile URLs
-* Cleans bout strings and fighter names.
-* Infers the winner/loser from the `OUTCOME` column.
-* Derives scheduled rounds (3 vs 5) from `TIME FORMAT`.
-* Outputs `build/fights_unified.csv` sorted by date.
-
----
+Minimal pipeline to build a **clean fights table**, classify **method strength**, and run **Elo** over UFC bouts.
 
 ## Requirements
 
 * Python **3.10+**
-* Packages: `pandas`
-  Install with:
+* `pandas`
 
   ```bash
   pip install -r requirements.txt
   ```
----
 
-## Project layout (suggested)
+  `requirements.txt`:
 
-```
-.
-├── data/
-│   ├── ufc_event_details.csv
-│   ├── ufc_fight_results.csv
-│   └── UFC_fighter_tott.csv   # optional
-├── build/                     # created by the script
-├── load_and_prepare.py
-├── requirements.txt
-└── README.md
-```
+  ```
+  pandas>=2.0
+  ```
 
----
+## Files (inputs)
 
-## Run Step 1
+* `data/ufc_event_details.csv` — event → date
+* `data/ufc_fight_results.csv` — bout, outcome, method, details
+* `data/UFC_fighter_tott.csv` *(optional)* — maps fighter name → UFC Stats URL (stable ID)
 
-### With fighter URLs (preferred)
+> Output files go in `build/`.
+
+## Run the pipeline (all steps)
+
+### 1) Step 1 — Unify fights (clean + join + sort)
+
+**With fighter URLs (preferred)**
 
 ```bash
 python load_and_prepare.py \
@@ -55,7 +39,7 @@ python load_and_prepare.py \
   -o build/fights_unified.csv
 ```
 
-### Without fighter URLs
+**Without fighter URLs**
 
 ```bash
 python load_and_prepare.py \
@@ -64,43 +48,7 @@ python load_and_prepare.py \
   -o build/fights_unified.csv
 ```
 
-If all goes well:
-
-```
-[OK] Wrote N rows to build/fights_unified.csv
-```
-
----
-
-## Output: `build/fights_unified.csv`
-
-Columns (ordered):
-
-```
-DATE, EVENT, BOUT,
-fighter_a_name, fighter_b_name,
-winner_label,                 # 'A' | 'B' | 'draw' | 'nc' | 'unknown'
-WEIGHTCLASS, METHOD, decision_type,  # quick tag: unanimous/split/majority/other
-ROUND, TIME, TIME FORMAT, REFEREE, DETAILS, URL,
-rounds_scheduled,             # 3 or 5 (derived)
-fighter_a_url, fighter_b_url  # only when fighters file provided
-```
-
-Notes:
-
-* `winner_label` is derived from `OUTCOME`:
-
-  * `W/L` → left name (A) won
-  * `L/W` → right name (B) won
-  * contains `D/D`/`DRAW` → draw
-  * contains `NC`/`N/C` → no contest
-* `decision_type` is a **rough** label from `METHOD`. We’ll refine dominance in Step 2.
-
-# Step 2 — Classify Methods (Finish vs Dominant Decision vs Decision)
-
-Run after you’ve created `build/fights_unified.csv` from Step 1.
-
-## Quick start
+### 2) Step 2 — Classify method (finish / dominant decision / decision)
 
 ```bash
 python classify_methods.py \
@@ -108,23 +56,55 @@ python classify_methods.py \
   -o build/fights_classified.csv
 ```
 
-## With custom multipliers (optional)
+(Optional multipliers)
 
 ```bash
 python classify_methods.py \
   -i build/fights_unified.csv \
   -o build/fights_classified.csv \
-  --m-finish 1.20 \
-  --m-dom 1.10 \
-  --m-dec 1.00
+  --m-finish 1.20 --m-dom 1.10 --m-dec 1.00
 ```
 
-## Input / Output
+### 3) Step 3 — Elo updates
 
-* **Input:** `build/fights_unified.csv` (from Step 1)
-* **Output:** `build/fights_classified.csv` with added columns:
+```bash
+python elo_update.py \
+  python elo_update.py \
+  -i build/fights_classified.csv \
+  --out-history build/elo_history.csv \
+  --out-ratings build/elo_ratings_current.csv \
+  --out-ratings-simple build/elo_ratings_simple.csv
+```
 
-  * `method_class` (`finish`, `decision_dominant`, `decision_normal`, `draw`, `nc`, `other`)
-  * `method_multiplier` (numeric)
-  * `decision_basis` (why it was classified that way)
-  * `judge_margins` (parsed from `DETAILS`, if available)
+(Optional params)
+
+```bash
+python elo_update.py \
+  -i build/fights_classified.csv \
+  --out-history build/elo_history.csv \
+  --out-ratings build/elo_ratings_current.csv \
+  --K 24 --scale 350 --base-rating 1500
+```
+
+## Outputs
+
+* `build/fights_unified.csv` — cleaned, dated, UFC fights (A/B names, winner\_label, rounds\_scheduled, etc.)
+* `build/fights_classified.csv` — adds `method_class`, `method_multiplier`, `decision_basis`, `judge_margins`
+* `build/elo_history.csv` — per-fight Elo audit (pre/post ratings, win prob `p_A_win`, `K_eff`, etc.)
+* `build/elo_ratings_current.csv` — latest rating per fighter + W/L/D and first/last UFC fight dates
+
+## Notes
+
+* Fights are processed **chronologically** (`DATE, EVENT, BOUT`).
+* New fighters start at **1500**; update rule: `rating += K * method_multiplier * (S - P)`.
+* Draws use `S=0.5`; **No Contests** are skipped.
+* `UFC_fighter_tott.csv` is optional; if missing, IDs fall back to normalized names.
+
+#### 3.1) Calculating peak Elo
+
+```bash
+python compute_peak_elo.py \
+  -i build/elo_history.csv \
+  -o build/elo_peak_ratings.csv \
+  --out-simple build/elo_peak_ratings_simple.csv
+```
