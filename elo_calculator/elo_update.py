@@ -160,8 +160,8 @@ def main():
     p.add_argument("--out-ratings-simple", type=Path, default=Path("../build/elo_ratings_simple.csv"),
                    help="Output CSV: fighter_name,rating only")
     p.add_argument("--base-rating", type=float, default=1500.0)
-    p.add_argument("--K", type=float, default=24.0)
-    p.add_argument("--scale", type=float, default=350.0)
+    p.add_argument("--K", type=float, default=32.0)
+    p.add_argument("--scale", type=float, default=400.0)
     args = p.parse_args()
 
     cfg = EloConfig(base_rating=args.base_rating, K=args.K, scale=args.scale)
