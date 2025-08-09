@@ -153,11 +153,11 @@ def main():
     p = argparse.ArgumentParser(description="Step 3: Run Elo updates over UFC fights.")
     p.add_argument("-i", "--input", type=Path, required=True,
                    help="Input CSV from Step 2 (build/fights_classified.csv)")
-    p.add_argument("--out-history", type=Path, default=Path("build/elo_history.csv"),
+    p.add_argument("--out-history", type=Path, default=Path("../build/elo_history.csv"),
                    help="Output CSV: per-fight Elo audit log")
-    p.add_argument("--out-ratings", type=Path, default=Path("build/elo_ratings_current.csv"),
+    p.add_argument("--out-ratings", type=Path, default=Path("../build/elo_ratings_current.csv"),
                    help="Output CSV: latest ratings snapshot")
-    p.add_argument("--out-ratings-simple", type=Path, default=Path("build/elo_ratings_simple.csv"),
+    p.add_argument("--out-ratings-simple", type=Path, default=Path("../build/elo_ratings_simple.csv"),
                    help="Output CSV: fighter_name,rating only")
     p.add_argument("--base-rating", type=float, default=1500.0)
     p.add_argument("--K", type=float, default=24.0)

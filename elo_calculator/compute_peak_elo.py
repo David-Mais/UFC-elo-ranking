@@ -56,9 +56,9 @@ def compute_peak(long_df: pd.DataFrame) -> pd.DataFrame:
 def main():
     ap = argparse.ArgumentParser(description="Compute peak Elo per fighter from elo_history.csv")
     ap.add_argument("-i", "--input", type=Path, required=True, help="Path to build/elo_history.csv")
-    ap.add_argument("-o", "--output", type=Path, default=Path("build/elo_peak_ratings.csv"),
+    ap.add_argument("-o", "--output", type=Path, default=Path("../build/elo_peak_ratings.csv"),
                     help="Output CSV (detailed)")
-    ap.add_argument("--out-simple", type=Path, default=Path("build/elo_peak_ratings_simple.csv"),
+    ap.add_argument("--out-simple", type=Path, default=Path("../build/elo_peak_ratings_simple.csv"),
                     help="Output CSV (fighter_name,peak_rating)")
     args = ap.parse_args()
 
