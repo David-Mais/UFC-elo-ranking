@@ -1,1 +1,4 @@
 pandas>=2.0
+seaborn
+matplotlib
+scikit-learn
