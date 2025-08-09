@@ -8,11 +8,29 @@ library of functions to scrape ufc stats
 # imports
 import pandas as pd
 import numpy as np
-import re
 import requests
-from bs4 import BeautifulSoup
 import itertools
 import string
+
+# --- add near top of LIB ---
+import re
+from bs4 import BeautifulSoup
+
+def _txt(node) -> str:
+    return re.sub(r"\s+", " ", node.get_text(" ", strip=True) if node else "").strip()
+
+def _clean_value(v: str) -> str:
+    if v is None:
+        return ""
+    v = v.replace("—", "").replace("--", "").strip()
+    v = re.sub(r"\s+", " ", v)
+    return "" if v.lower() in {"", "n/a", "na", "none"} else v
+
+def _extract_fighter_name(soup: BeautifulSoup) -> str:
+    # typical page title contains the name, sometimes followed by "Record:"
+    title = _txt(soup.select_one(".b-content__title")) or _txt(soup.select_one("h1, h2"))
+    return title.split("Record:")[0].strip()
+
 
 
 
@@ -459,28 +477,15 @@ def parse_organise_fight_results_and_stats(soup, url, fight_results_column_names
 
 # generate list of urls for fighter details
 def generate_alphabetical_urls():
-    '''
-    generate a list of alphabetical urls for fighter details
-    fighter urls are split by their last name and categorised alphabetically
-    loop through each character in the alphabet from a to z to parse all the urls
-    return all fighter urls as a list
+    """
+    Return the 27 UFCStats fighter index pages (a–z + 'other'), all on one page.
+    Example: https://ufcstats.com/statistics/fighters?char=a&page=all
+    """
+    import string
+    base = "http://ufcstats.com/statistics/fighters?char={}&page=all"
+    chars = list(string.ascii_lowercase) + ["other"]
+    return [base.format(c) for c in chars]
 
-    arguments:
-    none
-
-    returns:
-    a list of urls of fighter details
-    '''
-    # create empty list to store fighter urls to parse
-    list_of_alphabetical_urls = []
-
-    # fighters are split in alphabetically
-    # generate url for each alphabet and append to list
-    for character in list(string.ascii_lowercase):
-        list_of_alphabetical_urls.append('http://ufcstats.com/statistics/fighters?char='+character+'&page=all')
-    
-    # return
-    return list_of_alphabetical_urls
 
 
 
@@ -529,69 +534,88 @@ def parse_fighter_details(soup, fighter_details_column_names):
 
 
 # parse fighter tale of the tape
-def parse_fighter_tott(soup):
-    '''
-    parse fighter tale of the tape from soup
-    fighter details contain fighter, height, weight, reach, stance, dob
-    clean each element in the list, removing '\n' and ' ' 
-    e.g cleans '\n      Jose Aldo\n' into 'Jose Aldo'
-    returns a list of fighter tale of the tape
+def parse_fighter_tott(soup: BeautifulSoup) -> dict:
+    """
+    Returns a dict with keys: FIGHTER, HEIGHT, WEIGHT, REACH, STANCE, DOB
+    Works across layout variants and odd whitespace/punctuation.
+    """
+    out = {
+        "FIGHTER": _extract_fighter_name(soup),
+        "HEIGHT": "",
+        "WEIGHT": "",
+        "REACH": "",
+        "STANCE": "",
+        "DOB": "",
+    }
 
-    arguments:
-    soup (html): output of get_soup() parser
+    # map of canonical key -> list of label patterns we accept
+    label_map = {
+        "HEIGHT": [r"^height\b"],
+        "WEIGHT": [r"^weight\b"],
+        "REACH":  [r"^reach\b", r"^arm\s*reach\b"],  # sometimes "Arm Reach"
+        "STANCE": [r"^stance\b"],
+        "DOB":    [r"^dob\b", r"^date of birth\b"],
+    }
 
-    returns:
-    a list of fighter tale of the tape
-    '''
-    # create empty list to store fighter tale of the tape
-    fighter_tott = []
+    # ---- 1) primary: read "label: value" pairs from info boxes ----
+    # different pages swap wrappers/classes; cover a few
+    li_candidates = soup.select(
+        ".b-list__info-box .b-list__info-box-list li, "
+        ".b-list__box-list li, "
+        ".b-list__info-box li, "
+        "ul.b-list__box-list li"
+    )
 
-    # parse fighter name
-    fighter_name = soup.find('span', class_='b-content__title-highlight').text
-    # append fighter's name to fighter_tott
-    fighter_tott.append('Fighter:'+fighter_name)
+    for li in li_candidates:
+        line = _txt(li)
+        if not line or ":" not in line:
+            continue
+        lab, val = [x.strip() for x in line.split(":", 1)]
+        lab_l = lab.lower().rstrip(".")
+        for key, patterns in label_map.items():
+            if any(re.search(p, lab_l, re.I) for p in patterns):
+                out[key] = _clean_value(val)
 
-    # parse fighter's tale of the tape
-    tott = soup.find_all('ul', class_='b-list__box-list')[0]
-    # loop through each tag to get text and next_sibling text
-    for tag in tott.find_all('i'):
-        # add text together and append to fighter_tott
-        fighter_tott.append(tag.text + tag.next_sibling)
-    # clean each element in the list, removing '\n' and '  '
-    fighter_tott = [text.replace('\n', '').replace('  ', '') for text in fighter_tott]
-    
-    # return
-    return fighter_tott
+    # ---- 2) fallback: regex scan over full page text if any still missing ----
+    page_text = _txt(soup)
+
+    def _rx_one(label_regex: str) -> str:
+        # capture until the next known label or line end to avoid swallowing neighbors
+        pat = rf"{label_regex}\s*:\s*(.*?)(?=\s+(?:Height|Weight|Reach|Arm Reach|Stance|DOB|Date of Birth)\s*:|$)"
+        m = re.search(pat, page_text, re.I)
+        return _clean_value(m.group(1)) if m else ""
+
+    if not out["HEIGHT"]:
+        out["HEIGHT"] = _rx_one(r"Height")
+    if not out["WEIGHT"]:
+        out["WEIGHT"] = _rx_one(r"Weight")
+    if not out["REACH"]:
+        out["REACH"]  = _rx_one(r"(?:Reach|Arm Reach)")
+    if not out["STANCE"]:
+        out["STANCE"] = _rx_one(r"Stance")
+    if not out["DOB"]:
+        out["DOB"]    = _rx_one(r"(?:DOB|Date of Birth)")
+
+    # final cleanup (some values contain trailing labels accidentally)
+    for k in list(out.keys()):
+        out[k] = _clean_value(out[k])
+
+    return out
 
 
 
 # organise fighter tale of the tape
-def organise_fighter_tott(tott_from_soup, fighter_tott_column_names, url):
-    '''
-    organise list of fighter tale of the tape
-    remove label of tale of the tape using regex
-    e.g. 'Height:5'7"' to '5'7"
-    convert and return list as df
-
-    arguments:
-    tott_from_soup (list): list of fighter tale of the tale from parse_fighter_tott()
-    fighter_tott_column_names (list): list of column names for fighter tale of the tape
-    url (str): url of fighter
-
-    results:
-    a df of fighter tale of the tape
-    '''
-    # remove label of results using regex
-    fighter_tott_clean = [re.sub('^(.+?): ?', '', text) for text in tott_from_soup]
-    # append url to fighter_tott_clean
-    fighter_tott_clean.append(url)
-    # create empty df to store fighter's details
-    fighter_tott_df = pd.DataFrame(columns=fighter_tott_column_names)
-    # append fighter's details to fighter_details_df
-    fighter_tott_df.loc[(len(fighter_tott_df))] = fighter_tott_clean
-
-    # return
-    return fighter_tott_df
+def organise_fighter_tott(fighter_tott: dict, column_order: list, url: str) -> pd.DataFrame:
+    """
+    Aligns parsed dict to your YAML columns, fills blanks, and adds URL.
+    """
+    row = {c: "" for c in column_order}
+    for c in ("FIGHTER", "HEIGHT", "WEIGHT", "REACH", "STANCE", "DOB"):
+        if c in row and c in fighter_tott:
+            row[c] = fighter_tott[c]
+    if "URL" in row:
+        row["URL"] = url
+    return pd.DataFrame([row], columns=column_order)
 
 
 
