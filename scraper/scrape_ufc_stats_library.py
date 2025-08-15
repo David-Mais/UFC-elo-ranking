@@ -1,16 +1,9 @@
-'''
-Overview
-
-library of functions to scrape ufc stats
-
-'''
-
 # imports
 import pandas as pd
 import numpy as np
 import requests
-import itertools
-import string
+from requests.adapters import HTTPAdapter, Retry
+from typing import Union
 
 # --- add near top of LIB ---
 import re
@@ -33,221 +26,110 @@ def _extract_fighter_name(soup: BeautifulSoup) -> str:
 
 
 
+# Create and start new session
+def _make_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({"User-Agent": "ufcstats-scraper/1.0 (+https://example.com)"})
+    retries = Retry(total=3, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504))
+    s.mount("http://", HTTPAdapter(max_retries=retries))
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    return s
 
-# get soup from url
-def get_soup(url):
-    '''
-    get soup from url using beautifulsoup
+_SESSION = _make_session()
 
-    arguments:
-    url (str): url of page to parse
-
-    returns:
-    soup
-    '''
-    
-    # get page of url
-    page = requests.get(url)
-    # create soup
-    soup = BeautifulSoup(page.content, 'html.parser')
-
-    # return
-    return soup
+def get_soup(src: Union[str, bytes]) -> BeautifulSoup:
+    """
+    Accepts a URL or raw HTML and returns a BeautifulSoup object.
+    """
+    if isinstance(src, (bytes, bytearray)):
+        html = src
+    elif src.strip().lower().startswith(("http://", "https://")):
+        resp = _SESSION.get(src, timeout=15)
+        resp.raise_for_status()
+        html = resp.content
+    else:
+        # assume raw html string
+        html = src.encode("utf-8", errors="ignore")
+    return BeautifulSoup(html, "html.parser")
 
 
 
 # parse event details
-def parse_event_details(soup):
-    '''
-    parse event details from soup
-    includes names, urls, dates, locations of events
-    clean each element in the list, removing '\n' and ' ' 
-    e.g cleans '\n      Las Vegas, Nevada, USA\n' into 'Las Vegas, Nevada, USA'
-    return details as a df
-
-    arguments:
-    soup (html): output of get_soup()
-
-    returns:
-    a dataframe of event details
-    '''
-
-    # create empty list to store event names and urls
-    event_names = []
-    event_urls = []
-    event_dates = []
-    event_locations = []
-
-    # extract event name and urls
-    for tag in soup.find_all('a', class_='b-link b-link_style_black'):
-        event_names.append(tag.text.strip())
-        event_urls.append(tag['href'])
-
-    # extract event dates
-    for tag in soup.find_all('span', class_='b-statistics__date'):
-        event_dates.append(tag.text.strip())
-
-    # extract event locations
-    for tag in soup.find_all('td', class_='b-statistics__table-col b-statistics__table-col_style_big-top-padding'):
-        event_locations.append(tag.text.strip())
-
-    # remove first element of event dates and locations
-    # as first element here represent an upcoming event with no stats yet
-    event_dates = event_dates[1:]
-    event_locations = event_locations[1:]
-
-    # create df to store event details
-    event_details_df = pd.DataFrame({
-        'EVENT':event_names,
-        'URL':event_urls,
-        'DATE':event_dates,
-        'LOCATION':event_locations
-    })
-
-    # return
-    return event_details_df
+def parse_event_details(soup: BeautifulSoup) -> pd.DataFrame:
+    """
+    Robustly parse the Events table into a DataFrame with columns:
+    EVENT, URL, DATE, LOCATION
+    """
+    rows = []
+    # The events table rows usually have 'tr' with a link to the event page.
+    for tr in soup.select("table.b-statistics__table-events tr"):
+        a = tr.select_one("a.b-link.b-link_style_black")
+        date = tr.select_one("span.b-statistics__date")
+        loc  = tr.select_one("td.b-statistics__table-col.b-statistics__table-col_style_big-top-padding")
+        if not a or not a.get("href"):
+            continue
+        rows.append({
+            "EVENT": _txt(a),
+            "URL": a["href"].strip(),
+            "DATE": _txt(date),
+            "LOCATION": _txt(loc),
+        })
+    df = pd.DataFrame(rows, columns=["EVENT", "URL", "DATE", "LOCATION"])
+    # Drop obvious upcoming events (no stats yet) by heuristic: empty details page? (Optional)
+    # df = df[df["URL"].str.contains("/event-details/")]
+    return df.reset_index(drop=True)
 
 
 
 # parse fight details
-def parse_fight_details(soup):
-    '''
-    parse fight details from soup
-    includes urls, and fights
-    create bout from fighters' names and create event column as keys
-    return a df of fight details of an event
+def parse_fight_details(soup: BeautifulSoup) -> pd.DataFrame:
+    rows = []
+    event_name = _txt(soup.select_one("h2.b-content__title"))
+    for tr in soup.select("tr.b-fight-details__table-row.b-fight-details__table-row__hover.js-fight-details-click"):
+        fight_url = tr.get("data-link", "").strip()
+        # fighter name cells often have two 'p' elements (red & blue)
+        fighters = [ _txt(p) for p in tr.select("p.b-fight-details__table-text") if _txt(p) ]
+        # keep only first two meaningful text chunks for names
+        names = [n for n in fighters if len(n) > 1][:2]
+        if fight_url and len(names) == 2:
+            rows.append({"EVENT": event_name, "BOUT": f"{names[0]} vs. {names[1]}", "URL": fight_url})
+    return pd.DataFrame(rows, columns=["EVENT", "BOUT", "URL"])
 
-    arguments:
-    soup (html): output of get_soup()
-    
-    returns:
-    a df of fight details
-    '''
-    
-    # create empty list to store fight urls
-    fight_urls = []
-    # extract all fight detail urls for further parsing
-    for tag in soup.find_all('tr', class_='b-fight-details__table-row b-fight-details__table-row__hover js-fight-details-click'):
-        fight_urls.append(tag['data-link'])
-
-    # create an empty list to store fighters in an event
-    fighters_in_event = []
-    # extract all fighters in an event
-    for tag in soup.find_all('a', class_='b-link b-link_style_black'):
-        fighters_in_event.append(tag.text.strip())
-
-    # combine fighters in event in pairs to create fights
-    fights_in_event = [fighter_a+' vs. '+fighter_b for fighter_a, fighter_b in zip(fighters_in_event[::2], fighters_in_event[1::2])]    
-    
-    # create df to store fights
-    fight_details_df = pd.DataFrame({'BOUT':fights_in_event, 'URL':fight_urls})
-    # create event column as key
-    fight_details_df['EVENT'] = soup.find('h2', class_='b-content__title').text.strip()
-    # reorder columns
-    fight_details_df = move_columns(fight_details_df, ['EVENT'], 'BOUT', 'before')
-
-    # return
-    return fight_details_df
 
 
 
 # parse fight results from soup
-def parse_fight_results(soup):
-    '''
-    parase fight results from soup
-    results include event, bout, outcome weightclass, method, round, time, timeformat, referee, details
-    clean each element in the list, removing '\n' and ' ' 
-    e.g cleans '\n      Welterweight Bout\n' into 'Welterweight Bout'
-    details include description of finish or judges and scores
-    judges and scores also include details of point deduction
-    e.g. 'Point Deducted: Illegal Knee by Menne Tony Weeks 45 - 49.Doug Crosby 42 - 49.Jeff Mullen 44 - 49.'
-    return fight results as a list
+def parse_fight_results_dict(soup: BeautifulSoup) -> dict:
+    out = {
+        "EVENT": _txt(soup.select_one("h2.b-content__title")),
+        "BOUT": " vs. ".join([_txt(a) for a in soup.select("a.b-link.b-fight-details__person-link")][:2]),
+        "OUTCOME": "/".join([_txt(i) for i in soup.select("div.b-fight-details__person i")][:2]),
+        "WEIGHTCLASS": _txt(soup.select_one("div.b-fight-details__fight-head")),
+        "METHOD": _txt(soup.select_one("i.b-fight-details__text-item_first")),
+        "ROUND": "",
+        "TIME": "",
+        "TIMEFORMAT": "",
+        "REFEREE": "",
+        "DETAILS": "",
+    }
+    # remaining meta (order can vary)
+    metas = [ _txt(i) for i in soup.select("p.b-fight-details__text i.b-fight-details__text-item") ]
+    lab_map = {"Round:": "ROUND", "Time:": "TIME", "Time format:": "TIMEFORMAT", "Referee:": "REFEREE"}
+    for m in metas:
+        if ":" in m:
+            k, v = m.split(":", 1)
+            k = (k.strip() + ":")
+            if k in lab_map:
+                out[lab_map[k]] = _clean_value(v)
 
-    arguments:
-    soup (html): output of get_soup() parser
+    details = soup.select("p.b-fight-details__text")
+    if len(details) >= 2:
+        out["DETAILS"] = _clean_value(_txt(details[1]))
+    return out
 
-    returns:
-    a list of fight results
-    '''
-
-    # create an empty list to store results
-    fight_results = []
-
-    # parse event name
-    fight_results.append(soup.find('h2', class_='b-content__title').text)
-
-    # parse fighters
-    for tag in soup.find_all('a', class_='b-link b-fight-details__person-link'):
-        fight_results.append(tag.text)
-
-    # parse outcome as either w for win or l for loss
-    for tag in soup.find_all('div', class_='b-fight-details__person'):
-        for i_text in tag.find_all('i'):
-            fight_results.append(i_text.text)
-
-    # parse weightclass
-    fight_results.append(soup.find('div', class_='b-fight-details__fight-head').text)
-
-    # parse win method
-    fight_results.append(soup.find('i', class_='b-fight-details__text-item_first').text)
-
-    # parse remaining results
-    # includes round, time, time format, referee, details
-    remaining_results = soup.find_all('p', class_='b-fight-details__text')
-
-    # parse round, time, time format, referee
-    for tag in remaining_results[0].find_all('i', class_='b-fight-details__text-item'):
-        fight_results.append(tag.text.strip())
-
-    # parse details
-    fight_results.append(remaining_results[1].get_text())
-
-    # clean each element in the list, removing '\n' and '  ' 
-    fight_results = [text.replace('\n', '').replace('  ', '') for text in fight_results]
-
-    # return
-    return fight_results
-
-
-
-# organise fight results
-def organise_fight_results(results_from_soup, fight_results_column_names):
-    '''
-    organise list of fight results
-    fighters' names should be from index 1 and 2
-    fight outcome should be from index 3 and 4
-    other results includes from index 5 onwards
-    weightclass, method, round, time, time format, referee, and details, should be 
-    append all results into list and convert to a df
-
-    arguments:
-    results_from_soup (list): list of results from parse_fight_results()
-    fight_results_column_names (list): list of column names for fight results
-
-    returns:
-    an organised list of fight results
-    '''
-
-    # create empty list to store results
-    fight_results_clean = []
-    # append event name
-    fight_results_clean.append(results_from_soup[0])
-    # join fighters name into one, e.g. fighter_a vs. fighter_b
-    fight_results_clean.append(' vs. '.join(results_from_soup[1:3]))
-    # join outcome as 'w/l' or 'l/w'
-    fight_results_clean.append('/'.join(results_from_soup[3:5]))
-    # remove label of results using regex
-    # regrex, at the start of the string remove all characterts up to the first ':' 
-    # remove and a single ' ', if any,  after the ':'
-    fight_results_clean.extend([re.sub('^(.+?): ?', '', text) for text in results_from_soup[5:]])
-
-    # create empty df to store results
-    fight_result_df = pd.DataFrame(columns=fight_results_column_names)
-    # append each round of totals stats from first half of list to totals_df
-    fight_result_df.loc[len(fight_result_df)] = fight_results_clean
-
-    # return
-    return fight_result_df
+def organise_fight_results(results: dict, columns: list) -> pd.DataFrame:
+    row = {c: results.get(c, "") for c in columns}
+    return pd.DataFrame([row], columns=columns)
 
 
 
@@ -293,184 +175,129 @@ def parse_fight_stats(soup):
 
 
 # organise stats extracted from soup
-def organise_fight_stats(stats_from_soup):
-    '''
-    organise a list of raw stats extracted from soup
-    each set of stats starts with the fighter's name, the function groups each set together into a list of lists by the fighter's name
-
-    there are two different types of stats, totals and significant strikes
-    Totals include KD, SIG.STR., SIG.STR. %, TOTAL STR., TD, TD %, SUB.ATT, REV., CTRL
-    Significant Strikes include SIG.STR., SIG.STR. %, HEAD, BODY, LEG, DISTANCE, CLINCH, GROUND
-    
-    each type of stat has a summary of total stats for the fight, and individual round stats
-    the sets of stats are returned as a list of lists
-    e.g. [[totals - summary], [totals - round 1], [totals - round n]..., [significant strikes - summary], [significant strikes - round 1], [significant strikes - round n]...] 
-
-    arguments:
-    stats_from_soup (list): a list of fight stats from parse_fight_stats()
-
-    returns: 
-    a list of lists of fight stats
-    '''
-
-    # split clean stats by fighter's name into a list of list
-    # each sub list represents total strike and sig strikes stats per round and totals
-
-    # create empty list to store stats
-    fighter_stats_clean = []
-    # group stats by fighter's name
-    for name, stats in itertools.groupby(stats_from_soup, lambda x: x == stats_from_soup[0]):
-        # create empty sublist to store each set of stats
-        if name: fighter_stats_clean.append([])
-        # extend stats to sublist
-        fighter_stats_clean[-1].extend(stats)
-
-    # return
-    return fighter_stats_clean
+def organise_fight_stats(stats_from_soup: list) -> list[list]:
+    """
+    Split the flat list into segments starting at each occurrence of the fighter's name
+    (assumes the fighter's name appears before each block of stats).
+    Returns a list of segments: [ [name, ...block1...], [name, ...block2...], ... ]
+    """
+    if not stats_from_soup:
+        return []
+    name = stats_from_soup[0]
+    chunks, cur = [], []
+    for item in stats_from_soup:
+        if item == name and cur:
+            chunks.append(cur)
+            cur = [item]
+        else:
+            cur.append(item)
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
 
 # convert list of fighter stats into a structured dataframe
-def convert_fight_stats_to_df(clean_fighter_stats, totals_column_names, significant_strikes_column_names):
-    '''
-    convert a list of fighter stats from organise_fight_stats() into a structured dataframe
-    check if list of stats is empty, there are old fights that do not have stats
-    if fight has no stats, then fill stat columns with nans
-    if fight has stats continue and get number of rounds in the fight
-    for each round in fight, get stats for totals and significant strikes
-    the summary of stats for the fights are ignored
-    merge totals and significant stike stats together and return as one df
+def convert_fight_stats_to_df(clean_fighter_stats: list, totals_cols: list, sig_cols: list) -> pd.DataFrame:
+    """
+    Expecting clean_fighter_stats like:
+    [
+      [name, 'Totals', 'KD', '...', 'Summary values...'],
+      [name, 'Round 1', '...', '...'],
+      ...
+      [name, 'Significant Strikes', '...', 'Summary values...'],
+      [name, 'Round 1', '...', '...'],
+      ...
+    ]
+    This function extracts only the per-round rows for both Totals & Significant sections and merges them on ROUND.
+    """
+    if not clean_fighter_stats:
+        return pd.DataFrame(columns=totals_cols).assign(**{c: np.nan for c in totals_cols}).merge(
+            pd.DataFrame(columns=sig_cols).assign(**{c: np.nan for c in sig_cols}), how="outer"
+        )
 
-    arguments:
-    clean_fighter_stats (list): list of fighter stats from organise_fight_stats()
-    totals_column_names (list): list of column names for totals type stats
-    significant_strikes_column_names (list): list of column names for significant strike type stats
+    # Separate totals vs significant blocks by scanning headings
+    def _is_round(s: str) -> bool:
+        return isinstance(s, str) and s.strip().lower().startswith("round ")
 
-    returns:
-    a dataframe of fight stats
-    '''
+    totals_rows, sig_rows = [], []
+    section = None
+    for block in clean_fighter_stats:
+        # defensive checks
+        if not block:
+            continue
+        # find label tokens inside the block
+        label_tokens = [t for t in block if isinstance(t, str)]
+        # rudimentary section detection
+        if any("total" in t.lower() for t in label_tokens):
+            section = "totals"; continue
+        if any("significant" in t.lower() for t in label_tokens):
+            section = "sig"; continue
+        # round rows
+        if section and any(_is_round(t) for t in label_tokens):
+            if section == "totals":
+                totals_rows.append(block)
+            else:
+                sig_rows.append(block)
 
-    # create empty df to store each type of stat
-    totals_df = pd.DataFrame(columns=totals_column_names)
-    significant_strikes_df = pd.DataFrame(columns=significant_strikes_column_names)
+    # Build DataFrames. Expect first value in each row to be 'Round X' (coerce if needed).
+    def _rows_to_df(rows, cols):
+        out = []
+        for r in rows:
+            # pick the first token that looks like "Round x"
+            round_tok = next((t for t in r if _is_round(t)), "Round 1")
+            # then take the trailing numeric/stat tokens to match cols[1:]
+            values = [v for v in r if v != round_tok]
+            out.append([round_tok] + values[:len(cols)-1])
+        return pd.DataFrame(out, columns=cols)
 
-    # check if list of stats is empty 
-    # meaning that stats are unavailable for the fight
-    if len(clean_fighter_stats) == 0:
-        # append nans to totals_df and significant_strikes_df
-        totals_df.loc[len(totals_df)] = [np.nan] * len(list(totals_df))
-        significant_strikes_df.loc[len(significant_strikes_df)] = [np.nan] * len(list(significant_strikes_df))
-    
-    # if list of stats is no empty
-    else:
-        # get number of rounds in fight
-        # fight stats has two summary rows and two rows of stats for each round
-        # subtract two summary rows and divide the remaining rows by two to get the number of rounds
-        number_of_rounds = int((len(clean_fighter_stats) - 2) / 2)
+    totals_df = _rows_to_df(totals_rows, totals_cols) if totals_rows else pd.DataFrame(columns=totals_cols)
+    sig_df    = _rows_to_df(sig_rows, sig_cols)       if sig_rows    else pd.DataFrame(columns=sig_cols)
 
-        # create empty df to store each type of stat
-        totals_df = pd.DataFrame(columns=totals_column_names)
-        significant_strikes_df = pd.DataFrame(columns=significant_strikes_column_names)
-
-        # for each round in fight, get stats for totals and significant strikes
-        # the first half of stats are totals type and the second half are significant strike type
-        # [[totals - summary], [totals - round 1], [totals - round n]..., [significant strikes - summary], [significant strikes - round 1], [significant strikes - round n]...] 
-        for round in range(number_of_rounds):
-            # append each round of totals stats from first half of list to totals_df
-            totals_df.loc[len(totals_df)] = ['Round '+str(round+1)] + clean_fighter_stats[round+1]
-            # append each round of significant strike stats from second half of list to significant_strikes_df
-            significant_strikes_df.loc[len(significant_strikes_df)] = ['Round '+str(round+1)] + clean_fighter_stats[round+1+int((len(clean_fighter_stats) / 2))]
-
-    # merge totals and significant stike stats together as one df
-    fighter_stats_df = totals_df.merge(significant_strikes_df, how='inner')
-
-    # return
-    return fighter_stats_df
+    # Merge on ROUND
+    return totals_df.merge(sig_df, on="ROUND", how="outer")
 
 
 
 # combine fighter stats into one
-def combine_fighter_stats_dfs(fighter_a_stats_df, fighter_b_stats_df, soup):
-    '''
-    concat both fighter's stats into one df
-    create new event and bout column as a key
-    results in a dataframe of stats for both fighters for a fight
-
-    arguments:
-    fighter_a_stats_df (df): a df output from convert_fight_stats_to_df()
-    fighter_b_stats_df (df): a df output from convert_fight_stats_to_df()
-    soup (html): output of get_soup() parser
-
-    returns
-    a dataframe of stats for the fight
-    '''
-
-    # concat both fighters' stats into one df
-    fight_stats = pd.concat([fighter_a_stats_df, fighter_b_stats_df])
-
-    # get name of event from soup
-    fight_stats['EVENT'] = soup.find('h2', class_='b-content__title').text.strip()
-
-    # create empty list to store fighters' names
-    fighters_names = []
-    # parse fighters' name from soup
-    for tag in soup.find_all('a', class_='b-link b-fight-details__person-link'):
-        fighters_names.append(tag.text.strip())
-
-    # get name of bout with using fighters' names
-    fight_stats['BOUT'] = ' vs. '.join(fighters_names)
-
-    # reorder columns
-    fight_stats = move_columns(fight_stats, ['EVENT', 'BOUT'], 'ROUND', 'before')
-
-    # return
+def combine_fighter_stats_dfs(fighter_a_stats_df: pd.DataFrame, fighter_b_stats_df: pd.DataFrame, soup: BeautifulSoup) -> pd.DataFrame:
+    fight_stats = pd.concat([fighter_a_stats_df, fighter_b_stats_df], ignore_index=True)
+    fight_stats["EVENT"] = _txt(soup.select_one("h2.b-content__title"))
+    names = [_txt(a) for a in soup.select("a.b-link.b-fight-details__person-link")][:2]
+    fight_stats["BOUT"] = " vs. ".join(names)
+    # reorder if present
+    cols = list(fight_stats.columns)
+    for key in ["EVENT", "BOUT"]:
+        if key in cols and "ROUND" in cols:
+            fight_stats = move_columns(fight_stats, [key], "ROUND", "before")
     return fight_stats
 
 
 
+
 # parse and organise fight results and fight stats
-def parse_organise_fight_results_and_stats(soup, url, fight_results_column_names, totals_column_names, significant_strikes_column_names):
-    '''
-    parse and organise fight results and fight stats from soup
-    this function combines other functions that parse fight results and stats into one
-    and returns two dfs, one for fight results and the other for fight stats
+def parse_organise_fight_results_and_stats(soup: BeautifulSoup, url: str,
+                                           fight_results_column_names: list,
+                                           totals_column_names: list,
+                                           significant_strikes_column_names: list):
+    results = parse_fight_results_dict(soup)
+    results["URL"] = url
+    fight_results_df = organise_fight_results(results, fight_results_column_names)
 
-    arguments:
-    soup (html): output of get_soup() parser
-    url (str): url of fight
-    fight_results_df (df): an df
-    fight_results_column_names (list): list of column names for fight results
-    fight_stats_df (df):
-    totals_column_names (list): list of column names for totals type stats
-    significant_strikes_column_names (list): list of column names for significant strike type stats
+    a_raw, b_raw = parse_fight_stats(soup)
+    a_clean = organise_fight_stats(a_raw)
+    b_clean = organise_fight_stats(b_raw)
+    a_df = convert_fight_stats_to_df(a_clean, totals_column_names, significant_strikes_column_names)
+    b_df = convert_fight_stats_to_df(b_clean, totals_column_names, significant_strikes_column_names)
 
-    returns:
-    two dfs for fight results and stats
-    '''
+    # tag fighter names if available (first element of each raw list is often name)
+    if a_raw:
+        a_df["FIGHTER"] = a_raw[0]
+    if b_raw:
+        b_df["FIGHTER"] = b_raw[0]
 
-    # parse fight results
-
-    # parase fight results from soup
-    fight_results = parse_fight_results(soup)
-    # append fight url 
-    fight_results.append('URL:'+url)
-    # organise fight results
-    fight_results_df = organise_fight_results(fight_results, fight_results_column_names)
-
-    # parse fight stats
-
-    # parse full fight stats for both fighters
-    fighter_a_stats, fighter_b_stats = parse_fight_stats(soup)
-    # organise stats extracted from soup
-    fighter_a_stats_clean = organise_fight_stats(fighter_a_stats)
-    fighter_b_stats_clean = organise_fight_stats(fighter_b_stats)
-    # convert list of fighter stats into a structured dataframe
-    fighter_a_stats_df = convert_fight_stats_to_df(fighter_a_stats_clean, totals_column_names, significant_strikes_column_names)
-    fighter_b_stats_df = convert_fight_stats_to_df(fighter_b_stats_clean, totals_column_names, significant_strikes_column_names)
-    # combine fighter stats into one
-    fight_stats_df = combine_fighter_stats_dfs(fighter_a_stats_df, fighter_b_stats_df, soup)
-
-    # return
+    fight_stats_df = combine_fighter_stats_dfs(a_df, b_df, soup)
+    fight_stats_df["URL"] = url
     return fight_results_df, fight_stats_df
 
 
@@ -490,46 +317,19 @@ def generate_alphabetical_urls():
 
 
 # parse fighter details
-def parse_fighter_details(soup, fighter_details_column_names):
-    '''
-    parse fighter details from soup
-    fighter details include first name, last name, nickname, and url
-    returns dataframe with first, last, nickname, url
-
-    arguments:
-    soup (html): output of get_soup() parser
-
-    returns:
-    a dataframe of fighter details
-    '''
-    # parse fighter name
-    # create empty list to store fighters' names
-    fighter_names = []
-    # loop through and get fighter's first name, last name, nickname
-    for tag in soup.find_all('a', class_='b-link b-link_style_black'):
-        # append name to fighter_names
-        fighter_names.append(tag.text)
-
-    # parse fighter url
-    # create empty list to store fighters' urls
-    fighter_urls = []
-    # loop through and get fighter url
-    for tag in soup.find_all('a', class_='b-link b-link_style_black'):
-        # append url to list_of_fighter_urls
-        # each tag will have three urls that are duplicated
-        fighter_urls.append(tag['href'])
-
-    # zip fighter's first name, last name, nickname, and url into a list of tuples
-    # zip items in sets of threes
-    # e.g. ('Tom', 'Aaron', '', 'http://ufcstats.com/fighter-details/93fe7332d16c6ad9')
-    # if there is no first, last, or nickname, the field will be left blank
-    fighter_details = list(zip(fighter_names[0::3], fighter_names[1::3], fighter_names[2::3], fighter_urls[0::3]))
-
-    # convert list of tuples to a dataframe
-    fighter_details_df = pd.DataFrame(fighter_details, columns=fighter_details_column_names)
-    
-    # return
-    return fighter_details_df
+def parse_fighter_details(soup: BeautifulSoup, fighter_details_column_names: list) -> pd.DataFrame:
+    names, urls = [], []
+    for row in soup.select("table.b-statistics__table tr"):
+        anchors = row.select("a.b-link.b-link_style_black")
+        if len(anchors) >= 3:
+            # first, last, nickname
+            trio = [ _txt(a) for a in anchors[:3] ]
+            href = anchors[0].get("href", "").strip()
+            names.extend(trio)
+            urls.append(href)
+    # Interleave to tuples
+    records = list(zip(names[0::3], names[1::3], names[2::3], urls))
+    return pd.DataFrame(records, columns=fighter_details_column_names)
 
 
 
@@ -620,31 +420,17 @@ def organise_fighter_tott(fighter_tott: dict, column_order: list, url: str) -> p
 
 
 # reorder columns
-def move_columns(df, cols_to_move=[], ref_col='', place=''):
-    '''
-    reoder columns in df
-    move a list of columns before or after a reference column
-    taken from https://towardsdatascience.com/reordering-pandas-dataframe-columns-thumbs-down-on-standard-solutions-1ff0bc2941d5
-
-    arguments:
-    df (df): a dataframe
-    cols_to_move (list): list of columns to move
-    ref_col (str): reference column on where to move list of columns
-    place (str): where to place list of columns, enter 'before' or 'after'
-
-    '''
-    # get list of all columns in df
-    cols = df.columns.tolist()
-    
-    if place == 'after':
-        seg1 = cols[:list(cols).index(ref_col) + 1]
-        seg2 = cols_to_move
-    if place == 'before':
-        seg1 = cols[:list(cols).index(ref_col)]
-        seg2 = cols_to_move + [ref_col]
-
-    seg1 = [i for i in seg1 if i not in seg2]
-    seg3 = [i for i in cols if i not in seg1 + seg2]
-
-    # return
-    return(df[seg1 + seg2 + seg3])
+def move_columns(df: pd.DataFrame, cols_to_move=None, ref_col="", place="before") -> pd.DataFrame:
+    cols_to_move = cols_to_move or []
+    cols = list(df.columns)
+    if ref_col not in cols:
+        return df
+    # remove duplicates from cols_to_move and keep order
+    cols_to_move = [c for c in cols_to_move if c in cols and c != ref_col]
+    keep = [c for c in cols if c not in cols_to_move]
+    idx = keep.index(ref_col)
+    if place == "after":
+        new_order = keep[:idx+1] + cols_to_move + keep[idx+1:]
+    else:
+        new_order = keep[:idx] + cols_to_move + [ref_col] + keep[idx+1:]
+    return df.reindex(columns=new_order)
