@@ -37,17 +37,6 @@ Minimal pipeline to build a **clean fights table**, classify **method strength**
 
 ---
 
-## Requirements
-
-* Python **3.10+**
-* `pandas` (and optionally `PyYAML` if you use a config file)
-
-```bash
-pip install pandas pyyaml
-```
-
----
-
 ## Files (inputs)
 
 * `data/ufc_event_details.csv` — event → date
